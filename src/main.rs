@@ -69,7 +69,7 @@ struct Args {
     workers: usize,
 
     /// Timeout for each backend request in seconds
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = 30)]
     timeout_secs: u64,
 
     /// Minimum tweet length after cleaning (chars)
