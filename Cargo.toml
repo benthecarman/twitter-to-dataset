@@ -1,0 +1,21 @@
+[package]
+name = "twitter_dataset"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "twitter_to_dataset"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+indicatif = "0.17"
+tokio-util = "0.7"
+futures = "0.3"
+anyhow = "1.0.102"
+html-escape = "0.2"
