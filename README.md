@@ -143,6 +143,22 @@ cargo run -- \
   --model local-model
 ```
 
+Use custom data quality prompts:
+
+```bash
+cargo run -- \
+  --archive ~/Downloads/twitter-2026-06-03-archive \
+  --tweet-prompt prompts/tweets.txt \
+  --reply-prompt prompts/replies.txt \
+  --dm-prompt prompts/dms.txt \
+  --output dataset.jsonl \
+  --model qwen3:14b
+```
+
+Each prompt file replaces the built-in quality gate prompt for that record
+type. Custom prompts must still instruct the model to return only
+`{"can_generate": true}` or `{"can_generate": false}`.
+
 Generate standalone posts first:
 
 ```bash

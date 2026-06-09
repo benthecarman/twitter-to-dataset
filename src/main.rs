@@ -64,6 +64,18 @@ struct Args {
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
 
+    /// Text file containing the public tweet quality gate prompt
+    #[arg(long)]
+    tweet_prompt: Option<PathBuf>,
+
+    /// Text file containing the reply quality gate prompt
+    #[arg(long)]
+    reply_prompt: Option<PathBuf>,
+
+    /// Text file containing the DM quality gate prompt
+    #[arg(long)]
+    dm_prompt: Option<PathBuf>,
+
     /// Number of concurrent backend requests; defaults to 1 for Ollama, 4 for OpenAI
     #[arg(long)]
     workers: Option<usize>,
@@ -116,6 +128,13 @@ struct BackendConfig {
     model: String,
     base_url: String,
     api_key: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct QualityPrompts {
+    tweet: String,
+    reply: String,
+    dm: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -635,6 +654,32 @@ Return true only when the message expresses a complete standalone opinion,
 technical explanation, reusable outreach note, or other generally useful text
 that does not expose private information."#;
 
+fn load_prompt_file(
+    path: Option<&Path>,
+    default_prompt: &str,
+    label: &str,
+) -> anyhow::Result<String> {
+    let Some(path) = path else {
+        return Ok(default_prompt.to_string());
+    };
+
+    let prompt = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!("Could not read {label} prompt file {}: {e}", path.display())
+    })?;
+    if prompt.trim().is_empty() {
+        anyhow::bail!("{label} prompt file {} is empty", path.display());
+    }
+    Ok(prompt)
+}
+
+fn load_quality_prompts(args: &Args) -> anyhow::Result<QualityPrompts> {
+    Ok(QualityPrompts {
+        tweet: load_prompt_file(args.tweet_prompt.as_deref(), TWEET_GATE_PROMPT, "tweet")?,
+        reply: load_prompt_file(args.reply_prompt.as_deref(), REPLY_GATE_PROMPT, "reply")?,
+        dm: load_prompt_file(args.dm_prompt.as_deref(), DM_GATE_PROMPT, "DM")?,
+    })
+}
+
 enum GenerationOutcome {
     Generated(AlpacaRecord),
     Skipped(String),
@@ -766,11 +811,12 @@ async fn reply_can_generate_instruction(
     client: &Client,
     tweet: &str,
     backend: &BackendConfig,
+    prompt: &str,
 ) -> anyhow::Result<bool> {
     let content = chat_json(
         client,
         backend,
-        REPLY_GATE_PROMPT,
+        prompt,
         format!("Reply: \"{}\"", tweet),
         0.0,
         80,
@@ -794,11 +840,12 @@ async fn tweet_can_generate_instruction(
     client: &Client,
     tweet: &str,
     backend: &BackendConfig,
+    prompt: &str,
 ) -> anyhow::Result<bool> {
     let content = chat_json(
         client,
         backend,
-        TWEET_GATE_PROMPT,
+        prompt,
         format!("Post: \"{}\"", tweet),
         0.0,
         100,
@@ -822,11 +869,12 @@ async fn dm_can_generate_instruction(
     client: &Client,
     message: &str,
     backend: &BackendConfig,
+    prompt: &str,
 ) -> anyhow::Result<bool> {
     let content = chat_json(
         client,
         backend,
-        DM_GATE_PROMPT,
+        prompt,
         format!("Direct message: \"{}\"", message),
         0.0,
         100,
@@ -897,15 +945,18 @@ async fn process_tweet(
     client: &Client,
     tweet: &FilteredTweet,
     backend: &BackendConfig,
+    prompts: &QualityPrompts,
 ) -> anyhow::Result<GenerationOutcome> {
-    if tweet.is_reply && !reply_can_generate_instruction(client, &tweet.text, backend).await? {
+    if tweet.is_reply
+        && !reply_can_generate_instruction(client, &tweet.text, backend, &prompts.reply).await?
+    {
         return Ok(GenerationOutcome::Skipped(
             "reply too context-dependent for a useful instruction".to_string(),
         ));
     }
     if !tweet.is_reply
         && !tweet.is_dm
-        && !tweet_can_generate_instruction(client, &tweet.text, backend).await?
+        && !tweet_can_generate_instruction(client, &tweet.text, backend, &prompts.tweet).await?
     {
         return Ok(GenerationOutcome::Skipped(
             "tweet too context-dependent for a useful instruction".to_string(),
@@ -916,7 +967,9 @@ async fn process_tweet(
             "DM contains likely private information".to_string(),
         ));
     }
-    if tweet.is_dm && !dm_can_generate_instruction(client, &tweet.text, backend).await? {
+    if tweet.is_dm
+        && !dm_can_generate_instruction(client, &tweet.text, backend, &prompts.dm).await?
+    {
         return Ok(GenerationOutcome::Skipped(
             "DM too private or context-dependent for a useful instruction".to_string(),
         ));
@@ -957,6 +1010,7 @@ async fn generate_dataset(
     output: &PathBuf,
     client: Arc<Client>,
     backend: Arc<BackendConfig>,
+    prompts: Arc<QualityPrompts>,
     workers: usize,
 ) -> anyhow::Result<()> {
     let seen = load_checkpoint(output).await?;
@@ -1003,10 +1057,11 @@ async fn generate_dataset(
         .map(|tweet| {
             let client = Arc::clone(&client);
             let backend = Arc::clone(&backend);
+            let prompts = Arc::clone(&prompts);
             let sem = Arc::clone(&semaphore);
             async move {
                 let _permit = sem.acquire().await.unwrap();
-                let result = process_tweet(&client, &tweet, &backend).await;
+                let result = process_tweet(&client, &tweet, &backend, &prompts).await;
                 (tweet, result)
             }
         })
@@ -1143,6 +1198,7 @@ async fn main() -> anyhow::Result<()> {
         base_url,
         api_key,
     };
+    let prompts = Arc::new(load_quality_prompts(&args)?);
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(args.timeout_secs))
@@ -1174,6 +1230,7 @@ async fn main() -> anyhow::Result<()> {
             &args.output,
             Arc::clone(&client),
             Arc::clone(&backend),
+            Arc::clone(&prompts),
             workers,
         )
         .await?;
@@ -1186,6 +1243,7 @@ async fn main() -> anyhow::Result<()> {
             &args.dms_output,
             client,
             backend,
+            prompts,
             workers,
         )
         .await?;
@@ -1272,6 +1330,28 @@ mod tests {
         assert!(!contains_private_info(
             "This is a standalone technical explanation about privacy"
         ));
+    }
+
+    #[test]
+    fn load_prompt_file_uses_default_when_no_path() {
+        assert_eq!(
+            load_prompt_file(None, "default prompt", "tweet").unwrap(),
+            "default prompt"
+        );
+    }
+
+    #[test]
+    fn load_prompt_file_rejects_empty_custom_prompt() {
+        let path = std::env::temp_dir().join(format!(
+            "twitter-to-dataset-empty-prompt-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, " \n\t").unwrap();
+
+        let result = load_prompt_file(Some(&path), "default prompt", "tweet");
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result.is_err());
     }
 
     #[test]
