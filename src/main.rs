@@ -64,9 +64,9 @@ struct Args {
     #[arg(long, default_value = "OPENAI_API_KEY")]
     api_key_env: String,
 
-    /// Number of concurrent backend requests
-    #[arg(long, default_value_t = 4)]
-    workers: usize,
+    /// Number of concurrent backend requests; defaults to 1 for Ollama, 4 for OpenAI-compatible
+    #[arg(long)]
+    workers: Option<usize>,
 
     /// Timeout for each backend request in seconds
     #[arg(long, default_value_t = 30)]
@@ -938,13 +938,17 @@ async fn main() -> anyhow::Result<()> {
         BackendKind::Ollama => args.ollama_url.clone(),
         BackendKind::OpenaiCompatible => args.openai_base_url.clone(),
     };
+    let workers = args.workers.unwrap_or(match args.backend {
+        BackendKind::Ollama => 1,
+        BackendKind::OpenaiCompatible => 4,
+    });
 
     eprintln!(
         "Using backend: {} | model: {} | base URL: {} | workers: {} | timeout: {}s | output: {} | dms output: {}",
         args.backend,
         args.model,
         base_url,
-        args.workers,
+        workers,
         args.timeout_secs,
         args.output.display(),
         args.dms_output.display()
@@ -1040,7 +1044,7 @@ async fn main() -> anyhow::Result<()> {
             &args.output,
             Arc::clone(&client),
             Arc::clone(&backend),
-            args.workers,
+            workers,
         )
         .await?;
     }
@@ -1052,7 +1056,7 @@ async fn main() -> anyhow::Result<()> {
             &args.dms_output,
             client,
             backend,
-            args.workers,
+            workers,
         )
         .await?;
     }

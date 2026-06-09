@@ -178,6 +178,9 @@ cargo run -- \
   --timeout-secs 900
 ```
 
+`--workers` is optional. When omitted, it defaults to `1` for Ollama and `4`
+for OpenAI-compatible backends.
+
 ## Output Format
 
 Each generated line is an Alpaca-style JSON object:
