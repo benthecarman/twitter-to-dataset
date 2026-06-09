@@ -36,6 +36,35 @@ data/direct-messages.js
 data/account.js
 ```
 
+## Installation
+
+Install from a GitHub release:
+
+```bash
+curl -L https://github.com/benthecarman/twitter-data-parser/releases/latest/download/twitter_to_dataset-v0.1.0-x86_64-unknown-linux-gnu.tar.gz |
+  tar -xz
+sudo mv twitter_to_dataset /usr/local/bin/
+```
+
+Replace the archive name with the macOS artifact if needed:
+
+```text
+twitter_to_dataset-v0.1.0-x86_64-apple-darwin.tar.gz
+twitter_to_dataset-v0.1.0-aarch64-apple-darwin.tar.gz
+```
+
+Install with Cargo from GitHub:
+
+```bash
+cargo install --git https://github.com/benthecarman/twitter-data-parser twitter_dataset
+```
+
+Or run from a local checkout:
+
+```bash
+cargo run -- --help
+```
+
 ## Usage
 
 Preview records without calling Ollama or writing output:
