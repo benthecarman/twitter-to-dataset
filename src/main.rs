@@ -598,6 +598,24 @@ Return false when the reply is mostly:
 Return true when the reply expresses a complete opinion, explanation, joke,
 technical answer, or other standalone thought."#;
 
+const TWEET_GATE_PROMPT: &str = r#"You decide whether a public post can become useful LLM fine-tune data.
+Given only the cleaned post text, decide if someone could write a clear,
+reusable, standalone instruction that would naturally produce this text.
+
+Return ONLY a JSON object: {"can_generate": true} or {"can_generate": false}
+
+Return false when the post is mostly:
+- dependent on missing event, thread, link, image, poll, or quoted-post context
+- just a reaction, inside joke, meme caption, emoji, hashtag, or vague fragment
+- personal logistics, check-ins, announcements, or status updates with little
+  reusable signal
+- directed at a specific person, product, or moment in a way that cannot be
+  generalized
+
+Return true when the post expresses a complete standalone opinion,
+technical explanation, reusable joke, recommendation, observation, or other
+generally useful text."#;
+
 const DM_GATE_PROMPT: &str = r#"You decide whether a private direct message can become useful LLM fine-tune data.
 Given only the cleaned outbound message text, decide if someone could write a
 clear, reusable, standalone instruction that would naturally produce this text.
@@ -772,6 +790,34 @@ async fn reply_can_generate_instruction(
         })
 }
 
+async fn tweet_can_generate_instruction(
+    client: &Client,
+    tweet: &str,
+    backend: &BackendConfig,
+) -> anyhow::Result<bool> {
+    let content = chat_json(
+        client,
+        backend,
+        TWEET_GATE_PROMPT,
+        format!("Post: \"{}\"", tweet),
+        0.0,
+        100,
+    )
+    .await?;
+    let parsed: Value = serde_json::from_str(&content).map_err(|e| {
+        anyhow::anyhow!("Tweet gate did not return valid JSON: {e}; content: {content}")
+    })?;
+
+    parsed
+        .get("can_generate")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Tweet gate JSON did not include boolean field `can_generate`: {content}"
+            )
+        })
+}
+
 async fn dm_can_generate_instruction(
     client: &Client,
     message: &str,
@@ -855,6 +901,14 @@ async fn process_tweet(
     if tweet.is_reply && !reply_can_generate_instruction(client, &tweet.text, backend).await? {
         return Ok(GenerationOutcome::Skipped(
             "reply too context-dependent for a useful instruction".to_string(),
+        ));
+    }
+    if !tweet.is_reply
+        && !tweet.is_dm
+        && !tweet_can_generate_instruction(client, &tweet.text, backend).await?
+    {
+        return Ok(GenerationOutcome::Skipped(
+            "tweet too context-dependent for a useful instruction".to_string(),
         ));
     }
     if tweet.is_dm && contains_private_info(&tweet.text) {

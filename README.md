@@ -16,6 +16,9 @@ data on its own. The tool uses a few filters before writing records:
 - Basic filtering skips retweets, very short posts, mention-only posts,
   hashtag-only posts, and likely encoded blobs.
 - Deduplication skips repeated cleaned text.
+- Before instruction generation, public tweets are checked by the selected
+  model for standalone usefulness. Posts that depend on missing thread, link,
+  image, event, or quoted-post context are skipped.
 - Replies can be processed separately with `--only-replies` or excluded with
   `--exclude-replies`. When replies are included, the tool first asks the model
   whether the reply is standalone enough to become a useful instruction/output
