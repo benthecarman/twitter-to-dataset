@@ -57,6 +57,33 @@ cargo run -- \
   --model qwen3:14b
 ```
 
+Use an OpenAI-compatible backend instead of Ollama:
+
+```bash
+OPENAI_API_KEY=... cargo run -- \
+  --archive ~/Downloads/twitter-2026-06-03-archive \
+  --limit 25 \
+  --output test-dataset.jsonl \
+  --backend openai-compatible \
+  --model gpt-4.1-mini
+```
+
+Ollama is the default because it keeps archive data local. OpenAI-compatible
+backends are explicit opt-in and read their API key from `OPENAI_API_KEY` by
+default.
+
+For another OpenAI-compatible server, set its base URL:
+
+```bash
+cargo run -- \
+  --archive ~/Downloads/twitter-2026-06-03-archive \
+  --limit 25 \
+  --backend openai-compatible \
+  --openai-base-url http://localhost:1234 \
+  --api-key-env LM_STUDIO_API_KEY \
+  --model local-model
+```
+
 Generate standalone posts first:
 
 ```bash

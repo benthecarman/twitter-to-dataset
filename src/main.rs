@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
@@ -44,7 +44,11 @@ struct Args {
     #[arg(long)]
     owner_id: Option<String>,
 
-    /// Ollama model to use for instruction generation
+    /// Inference backend to use
+    #[arg(long, value_enum, default_value_t = BackendKind::Ollama)]
+    backend: BackendKind,
+
+    /// Model to use for instruction generation
     #[arg(long, default_value = "qwen3:14b")]
     model: String,
 
@@ -52,11 +56,19 @@ struct Args {
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
 
-    /// Number of concurrent Ollama requests
+    /// OpenAI-compatible base URL
+    #[arg(long, default_value = "https://api.openai.com")]
+    openai_base_url: String,
+
+    /// Environment variable containing the OpenAI-compatible API key
+    #[arg(long, default_value = "OPENAI_API_KEY")]
+    api_key_env: String,
+
+    /// Number of concurrent backend requests
     #[arg(long, default_value_t = 4)]
     workers: usize,
 
-    /// Timeout for each Ollama request in seconds
+    /// Timeout for each backend request in seconds
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
 
@@ -83,6 +95,29 @@ struct Args {
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BackendKind {
+    Ollama,
+    OpenaiCompatible,
+}
+
+impl std::fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendKind::Ollama => f.write_str("ollama"),
+            BackendKind::OpenaiCompatible => f.write_str("openai-compatible"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BackendConfig {
+    kind: BackendKind,
+    model: String,
+    base_url: String,
+    api_key: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct AlpacaRecord {
     instruction: String,
@@ -100,6 +135,21 @@ struct OllamaResponse {
 struct OllamaMessage {
     content: String,
     thinking: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiChatResponse {
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiChoice {
+    message: OpenAiMessage,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiMessage {
+    content: Option<String>,
 }
 
 // ── Tweet parsing ──────────────────────────────────────────────────────────────
@@ -553,9 +603,28 @@ fn ollama_content_from_body(body: &str) -> anyhow::Result<String> {
     Ok(content)
 }
 
-async fn ollama_chat(client: &Client, payload: Value, ollama_url: &str) -> anyhow::Result<String> {
+fn openai_content_from_body(body: &str) -> anyhow::Result<String> {
+    let data: OpenAiChatResponse = serde_json::from_str(body).map_err(|e| {
+        anyhow::anyhow!(
+            "Could not parse OpenAI-compatible response as chat JSON: {e}; body: {body}"
+        )
+    })?;
+    let content = data
+        .choices
+        .first()
+        .and_then(|choice| choice.message.content.as_deref())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if content.is_empty() {
+        anyhow::bail!("OpenAI-compatible backend returned empty message content; body: {body}");
+    }
+    Ok(content)
+}
+
+async fn ollama_chat(client: &Client, payload: Value, base_url: &str) -> anyhow::Result<String> {
     let resp = client
-        .post(format!("{}/api/chat", ollama_url))
+        .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
         .json(&payload)
         .send()
         .await?;
@@ -569,25 +638,91 @@ async fn ollama_chat(client: &Client, payload: Value, ollama_url: &str) -> anyho
     ollama_content_from_body(&body)
 }
 
+async fn openai_chat(
+    client: &Client,
+    payload: Value,
+    base_url: &str,
+    api_key: &str,
+) -> anyhow::Result<String> {
+    let resp = client
+        .post(format!(
+            "{}/v1/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "OpenAI-compatible backend returned HTTP {}: {}",
+            status,
+            body
+        );
+    }
+
+    openai_content_from_body(&body)
+}
+
+async fn chat_json(
+    client: &Client,
+    backend: &BackendConfig,
+    system_prompt: &str,
+    user_prompt: String,
+    temperature: f64,
+    max_tokens: u64,
+) -> anyhow::Result<String> {
+    match backend.kind {
+        BackendKind::Ollama => {
+            let payload = serde_json::json!({
+                "model": backend.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "stream": false,
+                "format": "json",
+                "think": false,
+                "options": {"temperature": temperature, "num_predict": max_tokens}
+            });
+            ollama_chat(client, payload, &backend.base_url).await
+        }
+        BackendKind::OpenaiCompatible => {
+            let Some(api_key) = backend.api_key.as_deref() else {
+                anyhow::bail!("OpenAI-compatible backend requires an API key");
+            };
+            let payload = serde_json::json!({
+                "model": backend.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"}
+            });
+            openai_chat(client, payload, &backend.base_url, api_key).await
+        }
+    }
+}
+
 async fn reply_can_generate_instruction(
     client: &Client,
     tweet: &str,
-    model: &str,
-    ollama_url: &str,
+    backend: &BackendConfig,
 ) -> anyhow::Result<bool> {
-    let payload = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": REPLY_GATE_PROMPT},
-            {"role": "user", "content": format!("Reply: \"{}\"", tweet)},
-        ],
-        "stream": false,
-        "format": "json",
-        "think": false,
-        "options": {"temperature": 0.0, "num_predict": 80}
-    });
-
-    let content = ollama_chat(client, payload, ollama_url).await?;
+    let content = chat_json(
+        client,
+        backend,
+        REPLY_GATE_PROMPT,
+        format!("Reply: \"{}\"", tweet),
+        0.0,
+        80,
+    )
+    .await?;
     let parsed: Value = serde_json::from_str(&content).map_err(|e| {
         anyhow::anyhow!("Reply gate did not return valid JSON: {e}; content: {content}")
     })?;
@@ -605,22 +740,17 @@ async fn reply_can_generate_instruction(
 async fn generate_instruction(
     client: &Client,
     tweet: &str,
-    model: &str,
-    ollama_url: &str,
+    backend: &BackendConfig,
 ) -> anyhow::Result<AlpacaRecord> {
-    let payload = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": format!("Text: \"{}\"", tweet)},
-        ],
-        "stream": false,
-        "format": "json",
-        "think": false,
-        "options": {"temperature": 0.1, "num_predict": 200}
-    });
-
-    let mut content = ollama_chat(client, payload, ollama_url).await?;
+    let mut content = chat_json(
+        client,
+        backend,
+        SYSTEM_PROMPT,
+        format!("Text: \"{}\"", tweet),
+        0.1,
+        200,
+    )
+    .await?;
 
     // Strip <think> blocks (reasoning models)
     let think_re = Regex::new(r"(?s)<think>.*?</think>").unwrap();
@@ -659,18 +789,15 @@ async fn generate_instruction(
 async fn process_tweet(
     client: &Client,
     tweet: &FilteredTweet,
-    model: &str,
-    ollama_url: &str,
+    backend: &BackendConfig,
 ) -> anyhow::Result<GenerationOutcome> {
-    if tweet.is_reply
-        && !reply_can_generate_instruction(client, &tweet.text, model, ollama_url).await?
-    {
+    if tweet.is_reply && !reply_can_generate_instruction(client, &tweet.text, backend).await? {
         return Ok(GenerationOutcome::Skipped(
             "reply too context-dependent for a useful instruction".to_string(),
         ));
     }
 
-    let record = generate_instruction(client, &tweet.text, model, ollama_url).await?;
+    let record = generate_instruction(client, &tweet.text, backend).await?;
     Ok(GenerationOutcome::Generated(record))
 }
 
@@ -698,8 +825,7 @@ async fn generate_dataset(
     records: Vec<FilteredTweet>,
     output: &PathBuf,
     client: Arc<Client>,
-    model: Arc<String>,
-    ollama_url: Arc<String>,
+    backend: Arc<BackendConfig>,
     workers: usize,
 ) -> anyhow::Result<()> {
     let seen = load_checkpoint(output).await?;
@@ -745,12 +871,11 @@ async fn generate_dataset(
     let results = stream::iter(to_process)
         .map(|tweet| {
             let client = Arc::clone(&client);
-            let model = Arc::clone(&model);
-            let ollama_url = Arc::clone(&ollama_url);
+            let backend = Arc::clone(&backend);
             let sem = Arc::clone(&semaphore);
             async move {
                 let _permit = sem.acquire().await.unwrap();
-                let result = process_tweet(&client, &tweet, &model, &ollama_url).await;
+                let result = process_tweet(&client, &tweet, &backend).await;
                 (tweet, result)
             }
         })
@@ -809,10 +934,16 @@ async fn generate_dataset(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let base_url = match args.backend {
+        BackendKind::Ollama => args.ollama_url.clone(),
+        BackendKind::OpenaiCompatible => args.openai_base_url.clone(),
+    };
 
     eprintln!(
-        "Using model: {} | workers: {} | timeout: {}s | output: {} | dms output: {}",
+        "Using backend: {} | model: {} | base URL: {} | workers: {} | timeout: {}s | output: {} | dms output: {}",
+        args.backend,
         args.model,
+        base_url,
         args.workers,
         args.timeout_secs,
         args.output.display(),
@@ -862,25 +993,45 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Verify Ollama is reachable
+    let api_key = match args.backend {
+        BackendKind::Ollama => None,
+        BackendKind::OpenaiCompatible => Some(std::env::var(&args.api_key_env).map_err(|_| {
+            anyhow::anyhow!(
+                "Missing API key env var `{}` for backend `{}`",
+                args.api_key_env,
+                args.backend
+            )
+        })?),
+    };
+    let backend = BackendConfig {
+        kind: args.backend,
+        model: args.model.clone(),
+        base_url,
+        api_key,
+    };
+
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(args.timeout_secs))
         .build()?;
 
-    client
-        .get(format!("{}/api/tags", args.ollama_url))
-        .send()
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Cannot reach Ollama at {} — is it running?",
-                args.ollama_url
-            )
-        })?;
+    if matches!(backend.kind, BackendKind::Ollama) {
+        client
+            .get(format!(
+                "{}/api/tags",
+                backend.base_url.trim_end_matches('/')
+            ))
+            .send()
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Cannot reach Ollama at {} — is it running?",
+                    backend.base_url
+                )
+            })?;
+    }
 
     let client = Arc::new(client);
-    let model = Arc::new(args.model.clone());
-    let ollama_url = Arc::new(args.ollama_url.clone());
+    let backend = Arc::new(backend);
 
     if !tweet_records.is_empty() {
         generate_dataset(
@@ -888,8 +1039,7 @@ async fn main() -> anyhow::Result<()> {
             tweet_records,
             &args.output,
             Arc::clone(&client),
-            Arc::clone(&model),
-            Arc::clone(&ollama_url),
+            Arc::clone(&backend),
             args.workers,
         )
         .await?;
@@ -901,8 +1051,7 @@ async fn main() -> anyhow::Result<()> {
             dm_records,
             &args.dms_output,
             client,
-            model,
-            ollama_url,
+            backend,
             args.workers,
         )
         .await?;
@@ -1002,6 +1151,33 @@ mod tests {
         assert_eq!(
             source_name_to_static("direct-messages.js"),
             "direct-messages.js"
+        );
+    }
+
+    #[test]
+    fn backend_kind_displays_cli_values() {
+        assert_eq!(BackendKind::Ollama.to_string(), "ollama");
+        assert_eq!(
+            BackendKind::OpenaiCompatible.to_string(),
+            "openai-compatible"
+        );
+    }
+
+    #[test]
+    fn parses_ollama_content() {
+        let body = r#"{"message":{"content":"{\"instruction\":\"Do a thing\"}","thinking":null},"done_reason":"stop"}"#;
+        assert_eq!(
+            ollama_content_from_body(body).unwrap(),
+            r#"{"instruction":"Do a thing"}"#
+        );
+    }
+
+    #[test]
+    fn parses_openai_compatible_content() {
+        let body = r#"{"choices":[{"message":{"content":"{\"instruction\":\"Do a thing\"}"}}]}"#;
+        assert_eq!(
+            openai_content_from_body(body).unwrap(),
+            r#"{"instruction":"Do a thing"}"#
         );
     }
 }
