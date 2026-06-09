@@ -28,6 +28,22 @@ struct Args {
     #[arg(long, default_value = "dataset.jsonl")]
     output: PathBuf,
 
+    /// Output JSONL file for direct messages
+    #[arg(long, default_value = "dms-dataset.jsonl")]
+    dms_output: PathBuf,
+
+    /// Also generate a separate dataset from outbound DMs
+    #[arg(long)]
+    include_dms: bool,
+
+    /// Generate only the DM dataset
+    #[arg(long)]
+    dms_only: bool,
+
+    /// Owner account id for outbound DM detection; read from account.js when omitted
+    #[arg(long)]
+    owner_id: Option<String>,
+
     /// Ollama model to use for instruction generation
     #[arg(long, default_value = "qwen3:14b")]
     model: String,
@@ -123,6 +139,34 @@ fn archive_files(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn archive_data_dir(path: &Path) -> PathBuf {
+    if path.is_file() {
+        return path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+    }
+
+    if path.file_name().and_then(|s| s.to_str()) == Some("data") {
+        path.to_path_buf()
+    } else {
+        path.join("data")
+    }
+}
+
+fn dm_files(path: &Path) -> Vec<PathBuf> {
+    if path.is_file() {
+        return vec![path.to_path_buf()];
+    }
+
+    let data_dir = archive_data_dir(path);
+    ["direct-messages.js", "direct-messages-group.js"]
+        .into_iter()
+        .map(|name| data_dir.join(name))
+        .filter(|candidate| candidate.exists())
+        .collect()
+}
+
 fn parse_archive_json(path: &Path) -> anyhow::Result<Vec<Value>> {
     let raw = std::fs::read_to_string(path)?;
 
@@ -134,6 +178,24 @@ fn parse_archive_json(path: &Path) -> anyhow::Result<Vec<Value>> {
 
     serde_json::from_str(json_str)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))
+}
+
+fn load_owner_id(path: &Path, override_id: Option<&str>) -> anyhow::Result<String> {
+    if let Some(owner_id) = override_id {
+        return Ok(owner_id.to_string());
+    }
+
+    let account_path = archive_data_dir(path).join("account.js");
+    let data = parse_archive_json(&account_path)?;
+    data.iter()
+        .find_map(|value| {
+            value
+                .get("account")
+                .and_then(|account| account.get("accountId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow::anyhow!("Could not find accountId in {}", account_path.display()))
 }
 
 fn push_tweet_from_value(value: &Value, tweets: &mut Vec<TweetText>) {
@@ -247,6 +309,109 @@ fn load_filtered_tweets(
     Ok((filtered, raw_count))
 }
 
+fn load_filtered_dms(
+    path: &Path,
+    owner_id: &str,
+    min_length: usize,
+    limit: Option<usize>,
+) -> anyhow::Result<(Vec<FilteredTweet>, usize)> {
+    let files = dm_files(path);
+    if files.is_empty() {
+        anyhow::bail!(
+            "Could not find direct-messages.js or direct-messages-group.js under {}",
+            path.display()
+        );
+    }
+
+    let mut raw_count = 0;
+    let mut seen_cleaned = HashSet::new();
+    let mut filtered = Vec::new();
+
+    for file in files {
+        let data = parse_archive_json(&file)?;
+        let source_name = file.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let before_raw = raw_count;
+        let before_kept = filtered.len();
+
+        for value in data {
+            let Some(messages) = value
+                .get("dmConversation")
+                .and_then(|conversation| conversation.get("messages"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+
+            for message in messages {
+                let Some(message_create) = message.get("messageCreate") else {
+                    continue;
+                };
+                let Some(text) = message_create.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(sender_id) = message_create.get("senderId").and_then(Value::as_str) else {
+                    continue;
+                };
+
+                raw_count += 1;
+                if sender_id != owner_id {
+                    continue;
+                }
+
+                let cleaned = clean_text(text);
+                let dm = TweetText {
+                    source: "direct-messages.js",
+                    id: message_create
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    text: text.to_string(),
+                    is_retweet: false,
+                    is_reply: false,
+                };
+
+                if should_keep(&dm, &cleaned, min_length, false, false)
+                    && seen_cleaned.insert(cleaned.clone())
+                {
+                    filtered.push(FilteredTweet {
+                        source: source_name_to_static(source_name),
+                        id: dm.id,
+                        text: cleaned,
+                        is_reply: false,
+                    });
+                    if limit.is_some_and(|limit| filtered.len() >= limit) {
+                        eprintln!(
+                            "Loaded {} DM records from {} (kept {}, stopped at limit)",
+                            raw_count - before_raw,
+                            source_name,
+                            filtered.len() - before_kept
+                        );
+                        return Ok((filtered, raw_count));
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "Loaded {} DM records from {} (kept {})",
+            raw_count - before_raw,
+            source_name,
+            filtered.len() - before_kept
+        );
+    }
+
+    Ok((filtered, raw_count))
+}
+
+fn source_name_to_static(source_name: &str) -> &'static str {
+    match source_name {
+        "direct-messages-group.js" => "direct-messages-group.js",
+        "direct-messages.js" => "direct-messages.js",
+        "note-tweet.js" => "note-tweet.js",
+        _ => "tweets.js",
+    }
+}
+
 fn clean_text(text: &str) -> String {
     let url_re = Regex::new(r"https?://\S+").unwrap();
     let leading_mentions_re = Regex::new(r"^((?:@\w+\s*)+)").unwrap();
@@ -280,6 +445,9 @@ fn should_keep(
     if cleaned.len() < min_length {
         return false;
     }
+    if contains_large_encoded_blob(cleaned) {
+        return false;
+    }
 
     // Drop if only hashtags/mentions remain
     let meaningful_words: Vec<&str> = cleaned
@@ -290,6 +458,16 @@ fn should_keep(
     meaningful_words
         .iter()
         .any(|word| word.chars().any(|c| c.is_alphanumeric()))
+}
+
+fn contains_large_encoded_blob(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let len = word.chars().count();
+        len >= 120
+            && word
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
+    })
 }
 
 // ── Checkpoint loading ─────────────────────────────────────────────────────────
@@ -317,20 +495,20 @@ async fn load_checkpoint(output: &PathBuf) -> anyhow::Result<HashSet<String>> {
 // ── Ollama instruction generation ──────────────────────────────────────────────
 
 const SYSTEM_PROMPT: &str = r#"You generate training data for an LLM fine-tune.
-Given a tweet written by a specific person, write a SHORT, natural instruction
-that someone might give to produce that tweet. The instruction should be generic
+Given a short text written by a specific person, write a SHORT, natural instruction
+that someone might give to produce that text. The instruction should be generic
 enough to be reusable, but specific enough to be meaningful.
 
 Rules:
 - Return ONLY a JSON object: {"instruction": "..."}
 - No explanation, no markdown, no extra text
 - Instruction should be 5-15 words
-- Do not reference Twitter, tweets, or social media in the instruction
+- Do not reference Twitter, DMs, messages, or social media in the instruction
 - Examples:
-  Tweet: "The best code is the code you never have to write"
+  Text: "The best code is the code you never have to write"
   {"instruction": "Share a thought about writing clean, minimal code"}
 
-  Tweet: "Austin traffic at 5pm is a special kind of hell"
+  Text: "Austin traffic at 5pm is a special kind of hell"
   {"instruction": "Complain humorously about rush hour traffic"}"#;
 
 const REPLY_GATE_PROMPT: &str = r#"You decide whether a reply can become useful LLM fine-tune data.
@@ -434,7 +612,7 @@ async fn generate_instruction(
         "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": format!("Tweet: \"{}\"", tweet)},
+            {"role": "user", "content": format!("Text: \"{}\"", tweet)},
         ],
         "stream": false,
         "format": "json",
@@ -496,6 +674,136 @@ async fn process_tweet(
     Ok(GenerationOutcome::Generated(record))
 }
 
+fn preview_records(label: &str, records: &[FilteredTweet]) {
+    eprintln!("\n{} preview:", label);
+    for (idx, tweet) in records.iter().take(25).enumerate() {
+        let id = tweet.id.as_deref().unwrap_or("unknown");
+        let kind = if tweet.is_reply { "reply" } else { "post" };
+        eprintln!(
+            "\n{}. [{}:{}:{}] {}",
+            idx + 1,
+            tweet.source,
+            id,
+            kind,
+            tweet.text
+        );
+    }
+    if records.len() > 25 {
+        eprintln!("\n... {} more kept records not shown", records.len() - 25);
+    }
+}
+
+async fn generate_dataset(
+    label: &str,
+    records: Vec<FilteredTweet>,
+    output: &PathBuf,
+    client: Arc<Client>,
+    model: Arc<String>,
+    ollama_url: Arc<String>,
+    workers: usize,
+) -> anyhow::Result<()> {
+    let seen = load_checkpoint(output).await?;
+    let to_process: Vec<FilteredTweet> = records
+        .into_iter()
+        .filter(|tweet| !seen.contains(tweet.text.as_str()))
+        .collect();
+
+    eprintln!(
+        "{} to process: {}  (already done: {})",
+        label,
+        to_process.len(),
+        seen.len()
+    );
+
+    if to_process.is_empty() {
+        eprintln!("{} dataset is complete.", label);
+        return Ok(());
+    }
+
+    let pb = ProgressBar::new(to_process.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) | {msg}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.set_message("F:0 S:0");
+
+    let mut out_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(output)
+        .await?;
+
+    let semaphore = Arc::new(Semaphore::new(workers));
+    let mut success_count = 0u64;
+    let mut fail_count = 0u64;
+    let mut skip_count = 0u64;
+    let mut shown_failures = 0u64;
+    let mut shown_skips = 0u64;
+
+    let results = stream::iter(to_process)
+        .map(|tweet| {
+            let client = Arc::clone(&client);
+            let model = Arc::clone(&model);
+            let ollama_url = Arc::clone(&ollama_url);
+            let sem = Arc::clone(&semaphore);
+            async move {
+                let _permit = sem.acquire().await.unwrap();
+                let result = process_tweet(&client, &tweet, &model, &ollama_url).await;
+                (tweet, result)
+            }
+        })
+        .buffer_unordered(workers);
+
+    tokio::pin!(results);
+
+    while let Some((tweet, record)) = results.next().await {
+        match record {
+            Ok(GenerationOutcome::Generated(r)) => {
+                let line = serde_json::to_string(&r)? + "\n";
+                out_file.write_all(line.as_bytes()).await?;
+                success_count += 1;
+            }
+            Ok(GenerationOutcome::Skipped(reason)) => {
+                skip_count += 1;
+                if shown_skips < 5 {
+                    pb.println(format!("Skipped: {} | {}", reason, tweet.text));
+                    shown_skips += 1;
+                }
+            }
+            Err(err) => {
+                fail_count += 1;
+                if shown_failures < 5 {
+                    pb.println(format!("Generation failed: {err:#}"));
+                    shown_failures += 1;
+                }
+            }
+        }
+        pb.set_message(format!("F:{} S:{}", fail_count, skip_count));
+        pb.inc(1);
+
+        if (success_count + fail_count + skip_count) % 100 == 0 {
+            out_file.flush().await?;
+        }
+    }
+
+    out_file.flush().await?;
+    pb.finish_with_message(format!(
+        "done — failed: {} skipped: {}",
+        fail_count, skip_count
+    ));
+
+    let total = seen.len() as u64 + success_count;
+    eprintln!(
+        "\n{} done. Total records: {}  |  New: {}  |  Skipped: {}  |  Failed: {}",
+        label, total, success_count, skip_count, fail_count
+    );
+    eprintln!("Output: {}", output.display());
+
+    Ok(())
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -503,62 +811,54 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     eprintln!(
-        "Using model: {} | workers: {} | timeout: {}s | output: {}",
+        "Using model: {} | workers: {} | timeout: {}s | output: {} | dms output: {}",
         args.model,
         args.workers,
         args.timeout_secs,
-        args.output.display()
+        args.output.display(),
+        args.dms_output.display()
     );
 
-    // Load, clean, filter, and dedupe tweets.
-    let (filtered, raw_count) = load_filtered_tweets(
-        &args.archive,
-        args.min_length,
-        args.exclude_replies,
-        args.only_replies,
-        args.limit,
-    )?;
+    let mut tweet_records = Vec::new();
+    if !args.dms_only {
+        let (filtered, raw_count) = load_filtered_tweets(
+            &args.archive,
+            args.min_length,
+            args.exclude_replies,
+            args.only_replies,
+            args.limit,
+        )?;
 
-    eprintln!(
-        "Kept {} tweets after filtering and dedupe (from {} raw records)",
-        filtered.len(),
-        raw_count
-    );
-
-    if args.dry_run {
-        for (idx, tweet) in filtered.iter().take(25).enumerate() {
-            let id = tweet.id.as_deref().unwrap_or("unknown");
-            let kind = if tweet.is_reply { "reply" } else { "post" };
-            eprintln!(
-                "\n{}. [{}:{}:{}] {}",
-                idx + 1,
-                tweet.source,
-                id,
-                kind,
-                tweet.text
-            );
-        }
-        if filtered.len() > 25 {
-            eprintln!("\n... {} more kept records not shown", filtered.len() - 25);
-        }
-        return Ok(());
+        eprintln!(
+            "Kept {} tweets after filtering and dedupe (from {} raw records)",
+            filtered.len(),
+            raw_count
+        );
+        tweet_records = filtered;
     }
 
-    // Load checkpoint
-    let seen = load_checkpoint(&args.output).await?;
-    let to_process: Vec<FilteredTweet> = filtered
-        .into_iter()
-        .filter(|tweet| !seen.contains(tweet.text.as_str()))
-        .collect();
+    let mut dm_records = Vec::new();
+    if args.include_dms || args.dms_only {
+        let owner_id = load_owner_id(&args.archive, args.owner_id.as_deref())?;
+        eprintln!("Using owner account id for DMs: {}", owner_id);
+        let (filtered, raw_count) =
+            load_filtered_dms(&args.archive, &owner_id, args.min_length, args.limit)?;
 
-    eprintln!(
-        "To process: {}  (already done: {})",
-        to_process.len(),
-        seen.len()
-    );
+        eprintln!(
+            "Kept {} outbound DMs after filtering and dedupe (from {} raw DM records)",
+            filtered.len(),
+            raw_count
+        );
+        dm_records = filtered;
+    }
 
-    if to_process.is_empty() {
-        eprintln!("Nothing to do — dataset is complete!");
+    if args.dry_run {
+        if !tweet_records.is_empty() {
+            preview_records("Tweets", &tweet_records);
+        }
+        if !dm_records.is_empty() {
+            preview_records("DMs", &dm_records);
+        }
         return Ok(());
     }
 
@@ -578,93 +878,35 @@ async fn main() -> anyhow::Result<()> {
             )
         })?;
 
-    // Progress bar
-    let pb = ProgressBar::new(to_process.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) | {msg}")
-            .unwrap()
-            .progress_chars("=>-"),
-    );
-    pb.set_message("F:0 S:0");
-
-    // Open output file for appending
-    let mut out_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&args.output)
-        .await?;
-
-    let semaphore = Arc::new(Semaphore::new(args.workers));
     let client = Arc::new(client);
     let model = Arc::new(args.model.clone());
     let ollama_url = Arc::new(args.ollama_url.clone());
 
-    let mut success_count = 0u64;
-    let mut fail_count = 0u64;
-    let mut skip_count = 0u64;
-    let mut shown_failures = 0u64;
-    let mut shown_skips = 0u64;
-
-    let results = stream::iter(to_process)
-        .map(|tweet| {
-            let client = Arc::clone(&client);
-            let model = Arc::clone(&model);
-            let ollama_url = Arc::clone(&ollama_url);
-            let sem = Arc::clone(&semaphore);
-            async move {
-                let _permit = sem.acquire().await.unwrap();
-                let result = process_tweet(&client, &tweet, &model, &ollama_url).await;
-                (tweet, result)
-            }
-        })
-        .buffer_unordered(args.workers);
-
-    tokio::pin!(results);
-
-    while let Some((tweet, record)) = results.next().await {
-        match record {
-            Ok(GenerationOutcome::Generated(r)) => {
-                let line = serde_json::to_string(&r)? + "\n";
-                out_file.write_all(line.as_bytes()).await?;
-                success_count += 1;
-            }
-            Ok(GenerationOutcome::Skipped(reason)) => {
-                skip_count += 1;
-                if shown_skips < 5 {
-                    pb.println(format!("Skipped reply: {} | {}", reason, tweet.text));
-                    shown_skips += 1;
-                }
-            }
-            Err(err) => {
-                fail_count += 1;
-                if shown_failures < 5 {
-                    pb.println(format!("Generation failed: {err:#}"));
-                    shown_failures += 1;
-                }
-            }
-        }
-        pb.set_message(format!("F:{} S:{}", fail_count, skip_count));
-        pb.inc(1);
-
-        // Flush every 100 records
-        if (success_count + fail_count + skip_count) % 100 == 0 {
-            out_file.flush().await?;
-        }
+    if !tweet_records.is_empty() {
+        generate_dataset(
+            "Tweets",
+            tweet_records,
+            &args.output,
+            Arc::clone(&client),
+            Arc::clone(&model),
+            Arc::clone(&ollama_url),
+            args.workers,
+        )
+        .await?;
     }
 
-    out_file.flush().await?;
-    pb.finish_with_message(format!(
-        "done — failed: {} skipped: {}",
-        fail_count, skip_count
-    ));
-
-    let total = seen.len() as u64 + success_count;
-    eprintln!(
-        "\n✅  Done! Total records: {}  |  New: {}  |  Skipped: {}  |  Failed: {}",
-        total, success_count, skip_count, fail_count
-    );
-    eprintln!("Output: {}", args.output.display());
+    if !dm_records.is_empty() {
+        generate_dataset(
+            "DMs",
+            dm_records,
+            &args.dms_output,
+            client,
+            model,
+            ollama_url,
+            args.workers,
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -722,5 +964,44 @@ mod tests {
         let cleaned = clean_text(&tweet.text);
 
         assert!(!should_keep(&tweet, &cleaned, 10, false, false));
+    }
+
+    #[test]
+    fn drops_large_encoded_blobs() {
+        let blob = "a".repeat(160);
+        let tweet = TweetText {
+            source: "direct-messages.js",
+            id: Some("1".to_string()),
+            text: blob.clone(),
+            is_retweet: false,
+            is_reply: false,
+        };
+
+        assert!(contains_large_encoded_blob(&blob));
+        assert!(!should_keep(&tweet, &blob, 10, false, false));
+    }
+
+    #[test]
+    fn archive_data_dir_handles_archive_root_and_data_dir() {
+        assert_eq!(
+            archive_data_dir(Path::new("/tmp/archive")),
+            PathBuf::from("/tmp/archive/data")
+        );
+        assert_eq!(
+            archive_data_dir(Path::new("/tmp/archive/data")),
+            PathBuf::from("/tmp/archive/data")
+        );
+    }
+
+    #[test]
+    fn source_name_to_static_handles_dm_sources() {
+        assert_eq!(
+            source_name_to_static("direct-messages-group.js"),
+            "direct-messages-group.js"
+        );
+        assert_eq!(
+            source_name_to_static("direct-messages.js"),
+            "direct-messages.js"
+        );
     }
 }

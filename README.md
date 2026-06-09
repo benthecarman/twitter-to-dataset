@@ -50,6 +50,30 @@ cargo run -- \
 Replies are gated by an extra LLM check before instruction generation. Replies
 that are too context-dependent are skipped instead of written to the dataset.
 
+Generate a separate outbound DM dataset:
+
+```bash
+cargo run -- \
+  --archive ~/Downloads/twitter-2026-06-03-archive \
+  --dms-only \
+  --dms-output dms-dataset.jsonl \
+  --model qwen3:14b
+```
+
+Generate tweets and outbound DMs in one run, still writing separate files:
+
+```bash
+cargo run -- \
+  --archive ~/Downloads/twitter-2026-06-03-archive \
+  --include-dms \
+  --output dataset.jsonl \
+  --dms-output dms-dataset.jsonl \
+  --model qwen3:14b
+```
+
+DM parsing uses `data/account.js` to detect your account id and only includes
+messages sent by you. Use `--owner-id` if the account file is unavailable.
+
 For slow local models:
 
 ```bash
@@ -77,3 +101,4 @@ Each generated line is an Alpaca-style JSON object:
 - Existing output files are used as checkpoints, so reruns skip already-written
   outputs.
 - Generated `.jsonl` files are ignored by git.
+- Deleted tweets and deleted note tweets are intentionally not included.
