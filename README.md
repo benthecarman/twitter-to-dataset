@@ -6,6 +6,26 @@ The tool reads archive files such as `data/tweets.js` and `data/note-tweet.js`,
 cleans and filters the text, then uses the selected model backend to generate
 a short instruction for each output record. Ollama is the default backend.
 
+## Data Quality Strategies
+
+The archive contains a lot of text that does not make good instruction-tuning
+data on its own. The tool uses a few filters before writing records:
+
+- Text cleanup removes URLs, leading mentions, HTML entities, and excess
+  whitespace.
+- Basic filtering skips retweets, very short posts, mention-only posts,
+  hashtag-only posts, and likely encoded blobs.
+- Deduplication skips repeated cleaned text.
+- Replies can be processed separately with `--only-replies` or excluded with
+  `--exclude-replies`. When replies are included, the tool first asks the model
+  whether the reply is standalone enough to become a useful instruction/output
+  pair. Context-dependent replies are skipped.
+- DMs are written to a separate dataset with `--dms-only` or `--include-dms`.
+  Only outbound DMs are considered. Before instruction generation, the tool
+  skips messages that look too context-dependent, too private, or likely contain
+  private contact information such as addresses, phone numbers, or email
+  addresses.
+
 ## Getting Your Twitter/X Archive
 
 In X/Twitter:
@@ -140,9 +160,6 @@ cargo run -- \
   --model qwen3:14b
 ```
 
-Replies are gated by an extra LLM check before instruction generation. Replies
-that are too context-dependent are skipped instead of written to the dataset.
-
 Generate a separate outbound DM dataset:
 
 ```bash
@@ -166,8 +183,6 @@ cargo run -- \
 
 DM parsing uses `data/account.js` to detect your account id and only includes
 messages sent by you. Use `--owner-id` if the account file is unavailable.
-Outbound DMs are gated before instruction generation; messages that are too
-context-dependent or appear to contain private information are skipped.
 
 For slow local models:
 
