@@ -92,21 +92,21 @@ cargo run -- \
   --model qwen3:14b
 ```
 
-Use an OpenAI-compatible backend instead of Ollama:
+Use the OpenAI backend instead of Ollama:
 
 ```bash
 cargo run -- \
   --archive ~/Downloads/twitter-2026-06-03-archive \
   --limit 25 \
   --output test-dataset.jsonl \
-  --backend openai-compatible \
+  --backend openai \
   --api-key sk-... \
   --model gpt-4.1-mini
 ```
 
-Ollama is the default because it keeps archive data local. OpenAI-compatible
-backends are explicit opt-in. The API key can be passed with `--api-key` or set
-with `OPENAI_API_KEY`.
+Ollama is the default because it keeps archive data local. The OpenAI backend
+is explicit opt-in. The API key can be passed with `--api-key` or set with
+`OPENAI_API_KEY`.
 
 For another OpenAI-compatible server, set its base URL:
 
@@ -114,7 +114,7 @@ For another OpenAI-compatible server, set its base URL:
 cargo run -- \
   --archive ~/Downloads/twitter-2026-06-03-archive \
   --limit 25 \
-  --backend openai-compatible \
+  --backend openai \
   --openai-base-url http://localhost:1234 \
   --api-key local-key \
   --model local-model
@@ -180,7 +180,7 @@ cargo run -- \
 ```
 
 `--workers` is optional. When omitted, it defaults to `1` for Ollama and `4`
-for OpenAI-compatible backends.
+for the OpenAI backend.
 
 ## Output Format
 

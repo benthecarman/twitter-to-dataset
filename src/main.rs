@@ -56,15 +56,15 @@ struct Args {
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
 
-    /// OpenAI-compatible base URL
+    /// OpenAI base URL
     #[arg(long, default_value = "https://api.openai.com")]
     openai_base_url: String,
 
-    /// OpenAI-compatible API key; can also be set with OPENAI_API_KEY
+    /// OpenAI API key; can also be set with OPENAI_API_KEY
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
 
-    /// Number of concurrent backend requests; defaults to 1 for Ollama, 4 for OpenAI-compatible
+    /// Number of concurrent backend requests; defaults to 1 for Ollama, 4 for OpenAI
     #[arg(long)]
     workers: Option<usize>,
 
@@ -98,14 +98,14 @@ struct Args {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum BackendKind {
     Ollama,
-    OpenaiCompatible,
+    Openai,
 }
 
 impl std::fmt::Display for BackendKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BackendKind::Ollama => f.write_str("ollama"),
-            BackendKind::OpenaiCompatible => f.write_str("openai-compatible"),
+            BackendKind::Openai => f.write_str("openai"),
         }
     }
 }
@@ -605,9 +605,7 @@ fn ollama_content_from_body(body: &str) -> anyhow::Result<String> {
 
 fn openai_content_from_body(body: &str) -> anyhow::Result<String> {
     let data: OpenAiChatResponse = serde_json::from_str(body).map_err(|e| {
-        anyhow::anyhow!(
-            "Could not parse OpenAI-compatible response as chat JSON: {e}; body: {body}"
-        )
+        anyhow::anyhow!("Could not parse OpenAI response as chat JSON: {e}; body: {body}")
     })?;
     let content = data
         .choices
@@ -617,7 +615,7 @@ fn openai_content_from_body(body: &str) -> anyhow::Result<String> {
         .trim()
         .to_string();
     if content.is_empty() {
-        anyhow::bail!("OpenAI-compatible backend returned empty message content; body: {body}");
+        anyhow::bail!("OpenAI backend returned empty message content; body: {body}");
     }
     Ok(content)
 }
@@ -657,11 +655,7 @@ async fn openai_chat(
     let status = resp.status();
     let body = resp.text().await?;
     if !status.is_success() {
-        anyhow::bail!(
-            "OpenAI-compatible backend returned HTTP {}: {}",
-            status,
-            body
-        );
+        anyhow::bail!("OpenAI backend returned HTTP {}: {}", status, body);
     }
 
     openai_content_from_body(&body)
@@ -690,9 +684,9 @@ async fn chat_json(
             });
             ollama_chat(client, payload, &backend.base_url).await
         }
-        BackendKind::OpenaiCompatible => {
+        BackendKind::Openai => {
             let Some(api_key) = backend.api_key.as_deref() else {
-                anyhow::bail!("OpenAI-compatible backend requires an API key");
+                anyhow::bail!("OpenAI backend requires an API key");
             };
             let payload = serde_json::json!({
                 "model": backend.model,
@@ -936,11 +930,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let base_url = match args.backend {
         BackendKind::Ollama => args.ollama_url.clone(),
-        BackendKind::OpenaiCompatible => args.openai_base_url.clone(),
+        BackendKind::Openai => args.openai_base_url.clone(),
     };
     let workers = args.workers.unwrap_or(match args.backend {
         BackendKind::Ollama => 1,
-        BackendKind::OpenaiCompatible => 4,
+        BackendKind::Openai => 4,
     });
 
     eprintln!(
@@ -999,7 +993,7 @@ async fn main() -> anyhow::Result<()> {
 
     let api_key = match args.backend {
         BackendKind::Ollama => None,
-        BackendKind::OpenaiCompatible => Some(args.api_key.clone().ok_or_else(|| {
+        BackendKind::Openai => Some(args.api_key.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "Missing --api-key or OPENAI_API_KEY for backend `{}`",
                 args.backend
@@ -1160,10 +1154,7 @@ mod tests {
     #[test]
     fn backend_kind_displays_cli_values() {
         assert_eq!(BackendKind::Ollama.to_string(), "ollama");
-        assert_eq!(
-            BackendKind::OpenaiCompatible.to_string(),
-            "openai-compatible"
-        );
+        assert_eq!(BackendKind::Openai.to_string(), "openai");
     }
 
     #[test]
