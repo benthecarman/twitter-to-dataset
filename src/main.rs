@@ -60,9 +60,9 @@ struct Args {
     #[arg(long, default_value = "https://api.openai.com")]
     openai_base_url: String,
 
-    /// Environment variable containing the OpenAI-compatible API key
-    #[arg(long, default_value = "OPENAI_API_KEY")]
-    api_key_env: String,
+    /// OpenAI-compatible API key; can also be set with OPENAI_API_KEY
+    #[arg(long, env = "OPENAI_API_KEY")]
+    api_key: Option<String>,
 
     /// Number of concurrent backend requests; defaults to 1 for Ollama, 4 for OpenAI-compatible
     #[arg(long)]
@@ -999,10 +999,9 @@ async fn main() -> anyhow::Result<()> {
 
     let api_key = match args.backend {
         BackendKind::Ollama => None,
-        BackendKind::OpenaiCompatible => Some(std::env::var(&args.api_key_env).map_err(|_| {
+        BackendKind::OpenaiCompatible => Some(args.api_key.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "Missing API key env var `{}` for backend `{}`",
-                args.api_key_env,
+                "Missing --api-key or OPENAI_API_KEY for backend `{}`",
                 args.backend
             )
         })?),

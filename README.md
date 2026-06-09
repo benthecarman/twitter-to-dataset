@@ -95,17 +95,18 @@ cargo run -- \
 Use an OpenAI-compatible backend instead of Ollama:
 
 ```bash
-OPENAI_API_KEY=... cargo run -- \
+cargo run -- \
   --archive ~/Downloads/twitter-2026-06-03-archive \
   --limit 25 \
   --output test-dataset.jsonl \
   --backend openai-compatible \
+  --api-key sk-... \
   --model gpt-4.1-mini
 ```
 
 Ollama is the default because it keeps archive data local. OpenAI-compatible
-backends are explicit opt-in and read their API key from `OPENAI_API_KEY` by
-default.
+backends are explicit opt-in. The API key can be passed with `--api-key` or set
+with `OPENAI_API_KEY`.
 
 For another OpenAI-compatible server, set its base URL:
 
@@ -115,7 +116,7 @@ cargo run -- \
   --limit 25 \
   --backend openai-compatible \
   --openai-base-url http://localhost:1234 \
-  --api-key-env LM_STUDIO_API_KEY \
+  --api-key local-key \
   --model local-model
 ```
 
