@@ -783,7 +783,7 @@ async fn generate_dataset(
         pb.set_message(format!("F:{} S:{}", fail_count, skip_count));
         pb.inc(1);
 
-        if (success_count + fail_count + skip_count) % 100 == 0 {
+        if (success_count + fail_count + skip_count).is_multiple_of(100) {
             out_file.flush().await?;
         }
     }
