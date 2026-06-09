@@ -1,10 +1,17 @@
 [package]
-name = "twitter_dataset"
+name = "twitter-to-dataset"
 version = "0.1.0"
 edition = "2021"
+description = "Convert a personal Twitter/X archive into Alpaca-format fine-tuning datasets"
+license = "MIT"
+repository = "https://github.com/benthecarman/twitter-to-dataset"
+readme = "README.md"
+keywords = ["twitter", "alpaca", "dataset", "llm", "finetuning"]
+categories = ["command-line-utilities", "parser-implementations"]
+exclude = ["dataset*.jsonl", "*.jsonl", "target/*"]
 
 [[bin]]
-name = "twitter_to_dataset"
+name = "twitter-to-dataset"
 path = "src/main.rs"
 
 [dependencies]

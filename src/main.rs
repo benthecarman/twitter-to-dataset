@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "twitter_to_dataset",
+    name = "twitter-to-dataset",
     about = "Convert Twitter archive to Alpaca fine-tune dataset"
 )]
 struct Args {
