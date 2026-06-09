@@ -94,6 +94,32 @@ Or run from a local checkout:
 cargo run -- --help
 ```
 
+## Shell Completions
+
+Generate completions with:
+
+```bash
+twitter-to-dataset --generate-completions <shell>
+```
+
+Supported shells are `bash`, `elvish`, `fish`, `powershell`, and `zsh`.
+
+Examples:
+
+```bash
+# bash
+twitter-to-dataset --generate-completions bash > /etc/bash_completion.d/twitter-to-dataset
+
+# zsh
+twitter-to-dataset --generate-completions zsh > "${fpath[1]}/_twitter-to-dataset"
+
+# fish
+twitter-to-dataset --generate-completions fish > ~/.config/fish/completions/twitter-to-dataset.fish
+
+# PowerShell
+twitter-to-dataset --generate-completions powershell > twitter-to-dataset.ps1
+```
+
 ## Usage
 
 Preview records without calling a model backend or writing output:

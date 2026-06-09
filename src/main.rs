@@ -1,4 +1,5 @@
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
+use clap_complete::{generate, Shell};
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
@@ -20,9 +21,13 @@ use tokio::sync::Semaphore;
     about = "Convert Twitter archive to Alpaca fine-tune dataset"
 )]
 struct Args {
+    /// Generate shell completions and print them to stdout
+    #[arg(long, value_enum)]
+    generate_completions: Option<Shell>,
+
     /// Path to a Twitter archive directory, data directory, tweets.js, or note-tweet.js
-    #[arg(long)]
-    archive: PathBuf,
+    #[arg(long, required_unless_present = "generate_completions")]
+    archive: Option<PathBuf>,
 
     /// Output JSONL file
     #[arg(long, default_value = "dataset.jsonl")]
@@ -103,6 +108,14 @@ struct Args {
     /// Print kept examples and exit without calling a model backend or writing output
     #[arg(long)]
     dry_run: bool,
+}
+
+impl Args {
+    fn archive(&self) -> anyhow::Result<&Path> {
+        self.archive
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Missing required --archive"))
+    }
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -1120,6 +1133,14 @@ async fn generate_dataset(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(shell) = args.generate_completions {
+        let mut command = Args::command();
+        let name = command.get_name().to_string();
+        generate(shell, &mut command, name, &mut std::io::stdout());
+        return Ok(());
+    }
+
+    let archive = args.archive()?;
     let base_url = match args.backend {
         BackendKind::Ollama => args.ollama_url.clone(),
         BackendKind::Openai => args.openai_base_url.clone(),
@@ -1143,7 +1164,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tweet_records = Vec::new();
     if !args.dms_only {
         let (filtered, raw_count) = load_filtered_tweets(
-            &args.archive,
+            archive,
             args.min_length,
             args.exclude_replies,
             args.only_replies,
@@ -1160,10 +1181,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut dm_records = Vec::new();
     if args.include_dms || args.dms_only {
-        let owner_id = load_owner_id(&args.archive, args.owner_id.as_deref())?;
+        let owner_id = load_owner_id(archive, args.owner_id.as_deref())?;
         eprintln!("Using owner account id for DMs: {}", owner_id);
         let (filtered, raw_count) =
-            load_filtered_dms(&args.archive, &owner_id, args.min_length, args.limit)?;
+            load_filtered_dms(archive, &owner_id, args.min_length, args.limit)?;
 
         eprintln!(
             "Kept {} outbound DMs after filtering and dedupe (from {} raw DM records)",
