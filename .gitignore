@@ -1,3 +1,4 @@
 /target/
 dataset*.jsonl
 *.jsonl
+prompts/
