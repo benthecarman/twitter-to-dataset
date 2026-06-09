@@ -6,6 +6,36 @@ The tool reads archive files such as `data/tweets.js` and `data/note-tweet.js`,
 cleans and filters the text, then uses a local Ollama model to generate a short
 instruction for each output record.
 
+## Getting Your Twitter/X Archive
+
+In X/Twitter:
+
+1. Open **Settings and privacy**.
+2. Go to **Your account**.
+3. Select **Download an archive of your data**.
+4. Complete the verification flow and request the archive.
+5. When X emails or notifies you that it is ready, download the `.zip`.
+6. Extract it locally.
+
+This tool expects either the extracted archive directory or its `data/`
+directory. For example:
+
+```bash
+cargo run -- \
+  --archive ~/Downloads/twitter-2026-06-03-archive \
+  --dry-run \
+  --limit 25
+```
+
+The extracted archive should contain files like:
+
+```text
+data/tweets.js
+data/note-tweet.js
+data/direct-messages.js
+data/account.js
+```
+
 ## Usage
 
 Preview records without calling Ollama or writing output:
