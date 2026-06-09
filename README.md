@@ -3,8 +3,8 @@
 Convert a personal Twitter/X archive into an Alpaca-format JSONL dataset.
 
 The tool reads archive files such as `data/tweets.js` and `data/note-tweet.js`,
-cleans and filters the text, then uses a local Ollama model to generate a short
-instruction for each output record.
+cleans and filters the text, then uses the selected model backend to generate
+a short instruction for each output record. Ollama is the default backend.
 
 ## Getting Your Twitter/X Archive
 
@@ -73,7 +73,7 @@ cargo run -- --help
 
 ## Usage
 
-Preview records without calling Ollama or writing output:
+Preview records without calling a model backend or writing output:
 
 ```bash
 cargo run -- \

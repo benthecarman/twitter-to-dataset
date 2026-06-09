@@ -88,7 +88,7 @@ struct Args {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Print kept examples and exit without calling Ollama or writing output
+    /// Print kept examples and exit without calling a model backend or writing output
     #[arg(long)]
     dry_run: bool,
 }
