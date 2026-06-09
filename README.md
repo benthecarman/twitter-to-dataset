@@ -159,3 +159,12 @@ Each generated line is an Alpaca-style JSON object:
   outputs.
 - Generated `.jsonl` files are ignored by git.
 - Deleted tweets and deleted note tweets are intentionally not included.
+
+## Releases
+
+Pushing a version tag creates a GitHub release with Linux and macOS binaries:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
