@@ -166,6 +166,8 @@ cargo run -- \
 
 DM parsing uses `data/account.js` to detect your account id and only includes
 messages sent by you. Use `--owner-id` if the account file is unavailable.
+Outbound DMs are gated before instruction generation; messages that are too
+context-dependent or appear to contain private information are skipped.
 
 For slow local models:
 

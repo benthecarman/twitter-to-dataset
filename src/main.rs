@@ -169,6 +169,7 @@ struct FilteredTweet {
     id: Option<String>,
     text: String,
     is_reply: bool,
+    is_dm: bool,
 }
 
 fn archive_files(path: &Path) -> Vec<PathBuf> {
@@ -334,6 +335,7 @@ fn load_filtered_tweets(
                         id: tweet.id,
                         text: cleaned,
                         is_reply: tweet.is_reply,
+                        is_dm: false,
                     });
                     if limit.is_some_and(|limit| filtered.len() >= limit) {
                         eprintln!(
@@ -428,6 +430,7 @@ fn load_filtered_dms(
                         id: dm.id,
                         text: cleaned,
                         is_reply: false,
+                        is_dm: true,
                     });
                     if limit.is_some_and(|limit| filtered.len() >= limit) {
                         eprintln!(
@@ -520,6 +523,25 @@ fn contains_large_encoded_blob(text: &str) -> bool {
     })
 }
 
+fn contains_private_info(text: &str) -> bool {
+    let email_re = Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").unwrap();
+    if email_re.is_match(text) {
+        return true;
+    }
+
+    let phone_re =
+        Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b").unwrap();
+    if phone_re.is_match(text) {
+        return true;
+    }
+
+    let address_re = Regex::new(
+        r"(?i)\b\d{1,6}\s+[A-Z0-9.'#-]+(?:\s+[A-Z0-9.'#-]+){0,6}\s+(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|pl|place|way|pkwy|parkway)\b",
+    )
+    .unwrap();
+    address_re.is_match(text)
+}
+
 // ── Checkpoint loading ─────────────────────────────────────────────────────────
 
 async fn load_checkpoint(output: &PathBuf) -> anyhow::Result<HashSet<String>> {
@@ -575,6 +597,25 @@ Return false when the reply is mostly:
 
 Return true when the reply expresses a complete opinion, explanation, joke,
 technical answer, or other standalone thought."#;
+
+const DM_GATE_PROMPT: &str = r#"You decide whether a private direct message can become useful LLM fine-tune data.
+Given only the cleaned outbound message text, decide if someone could write a
+clear, reusable, standalone instruction that would naturally produce this text.
+
+Return ONLY a JSON object: {"can_generate": true} or {"can_generate": false}
+
+Return false when the message is:
+- dependent on missing conversation context
+- a short answer to an unknown question
+- mostly logistics, scheduling, thanks, greetings, or personal coordination
+- specific to a private person, private conversation, or private relationship
+- containing or requesting private/sensitive information such as addresses,
+  phone numbers, emails, passwords, keys, tokens, invoices, transaction blobs,
+  exact meeting locations, or account details
+
+Return true only when the message expresses a complete standalone opinion,
+technical explanation, reusable outreach note, or other generally useful text
+that does not expose private information."#;
 
 enum GenerationOutcome {
     Generated(AlpacaRecord),
@@ -731,6 +772,32 @@ async fn reply_can_generate_instruction(
         })
 }
 
+async fn dm_can_generate_instruction(
+    client: &Client,
+    message: &str,
+    backend: &BackendConfig,
+) -> anyhow::Result<bool> {
+    let content = chat_json(
+        client,
+        backend,
+        DM_GATE_PROMPT,
+        format!("Direct message: \"{}\"", message),
+        0.0,
+        100,
+    )
+    .await?;
+    let parsed: Value = serde_json::from_str(&content).map_err(|e| {
+        anyhow::anyhow!("DM gate did not return valid JSON: {e}; content: {content}")
+    })?;
+
+    parsed
+        .get("can_generate")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow::anyhow!("DM gate JSON did not include boolean field `can_generate`: {content}")
+        })
+}
+
 async fn generate_instruction(
     client: &Client,
     tweet: &str,
@@ -790,6 +857,16 @@ async fn process_tweet(
             "reply too context-dependent for a useful instruction".to_string(),
         ));
     }
+    if tweet.is_dm && contains_private_info(&tweet.text) {
+        return Ok(GenerationOutcome::Skipped(
+            "DM contains likely private information".to_string(),
+        ));
+    }
+    if tweet.is_dm && !dm_can_generate_instruction(client, &tweet.text, backend).await? {
+        return Ok(GenerationOutcome::Skipped(
+            "DM too private or context-dependent for a useful instruction".to_string(),
+        ));
+    }
 
     let record = generate_instruction(client, &tweet.text, backend).await?;
     Ok(GenerationOutcome::Generated(record))
@@ -799,7 +876,13 @@ fn preview_records(label: &str, records: &[FilteredTweet]) {
     eprintln!("\n{} preview:", label);
     for (idx, tweet) in records.iter().take(25).enumerate() {
         let id = tweet.id.as_deref().unwrap_or("unknown");
-        let kind = if tweet.is_reply { "reply" } else { "post" };
+        let kind = if tweet.is_dm {
+            "dm"
+        } else if tweet.is_reply {
+            "reply"
+        } else {
+            "post"
+        };
         eprintln!(
             "\n{}. [{}:{}:{}] {}",
             idx + 1,
@@ -1125,6 +1208,16 @@ mod tests {
 
         assert!(contains_large_encoded_blob(&blob));
         assert!(!should_keep(&tweet, &blob, 10, false, false));
+    }
+
+    #[test]
+    fn detects_private_contact_info() {
+        assert!(contains_private_info("123 Example St, Unit 456"));
+        assert!(contains_private_info("email me at test@example.com"));
+        assert!(contains_private_info("call me at 512-555-1212"));
+        assert!(!contains_private_info(
+            "This is a standalone technical explanation about privacy"
+        ));
     }
 
     #[test]
