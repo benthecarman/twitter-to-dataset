@@ -169,7 +169,7 @@ cargo run -- \
   --model local-model
 ```
 
-Use custom data quality prompts:
+Use custom generation prompts:
 
 ```bash
 cargo run -- \
@@ -181,9 +181,9 @@ cargo run -- \
   --model qwen3:14b
 ```
 
-Each prompt file replaces the built-in quality gate prompt for that record
-type. Custom prompts must still instruct the model to return only
-`{"can_generate": true}` or `{"can_generate": false}`.
+Each prompt file replaces the full built-in prompt for that record type,
+including the data quality rules and instruction-generation rules. Each kept
+record uses one backend request.
 
 Generate standalone posts first:
 

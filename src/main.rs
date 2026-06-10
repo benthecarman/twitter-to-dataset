@@ -69,15 +69,15 @@ struct Args {
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
 
-    /// Text file containing the public tweet quality gate prompt
+    /// Text file containing the public tweet generation prompt
     #[arg(long)]
     tweet_prompt: Option<PathBuf>,
 
-    /// Text file containing the reply quality gate prompt
+    /// Text file containing the reply generation prompt
     #[arg(long)]
     reply_prompt: Option<PathBuf>,
 
-    /// Text file containing the DM quality gate prompt
+    /// Text file containing the DM generation prompt
     #[arg(long)]
     dm_prompt: Option<PathBuf>,
 
@@ -144,7 +144,7 @@ struct BackendConfig {
 }
 
 #[derive(Clone, Debug)]
-struct QualityPrompts {
+struct GenerationPrompts {
     tweet: String,
     reply: String,
     dm: String,
@@ -598,28 +598,18 @@ async fn load_checkpoint(output: &PathBuf) -> anyhow::Result<HashSet<String>> {
 
 // ── Ollama instruction generation ──────────────────────────────────────────────
 
-const SYSTEM_PROMPT: &str = r#"You generate training data for an LLM fine-tune.
-Given a short text written by a specific person, write a SHORT, natural instruction
-that someone might give to produce that text. The instruction should be generic
-enough to be reusable, but specific enough to be meaningful.
+const REPLY_GATE_PROMPT: &str = r#"You generate training data for an LLM fine-tune from a reply.
+Given only the cleaned reply text, decide if someone could write a clear,
+standalone instruction that would naturally produce this text. If so, write a
+SHORT, natural instruction that is generic enough to be reusable, but specific
+enough to be meaningful.
+
+Return ONLY a JSON object: {"can_generate": true, "instruction": "..."} or {"can_generate": false, "instruction": ""}
 
 Rules:
-- Return ONLY a JSON object: {"instruction": "..."}
 - No explanation, no markdown, no extra text
 - Instruction should be 5-15 words
-- Do not reference Twitter, DMs, messages, or social media in the instruction
-- Examples:
-  Text: "The best code is the code you never have to write"
-  {"instruction": "Share a thought about writing clean, minimal code"}
-
-  Text: "Austin traffic at 5pm is a special kind of hell"
-  {"instruction": "Complain humorously about rush hour traffic"}"#;
-
-const REPLY_GATE_PROMPT: &str = r#"You decide whether a reply can become useful LLM fine-tune data.
-Given only the cleaned reply text, decide if someone could write a clear,
-standalone instruction that would naturally produce this text.
-
-Return ONLY a JSON object: {"can_generate": true} or {"can_generate": false}
+- Do not reference Twitter, replies, messages, or social media in the instruction
 
 Return false when the reply is mostly:
 - dependent on missing conversation context
@@ -630,11 +620,24 @@ Return false when the reply is mostly:
 Return true when the reply expresses a complete opinion, explanation, joke,
 technical answer, or other standalone thought."#;
 
-const TWEET_GATE_PROMPT: &str = r#"You decide whether a public post can become useful LLM fine-tune data.
+const TWEET_GATE_PROMPT: &str = r#"You generate training data for an LLM fine-tune from a public post.
 Given only the cleaned post text, decide if someone could write a clear,
-reusable, standalone instruction that would naturally produce this text.
+reusable, standalone instruction that would naturally produce this text. If so,
+write a SHORT, natural instruction that is generic enough to be reusable, but
+specific enough to be meaningful.
 
-Return ONLY a JSON object: {"can_generate": true} or {"can_generate": false}
+Return ONLY a JSON object: {"can_generate": true, "instruction": "..."} or {"can_generate": false, "instruction": ""}
+
+Rules:
+- No explanation, no markdown, no extra text
+- Instruction should be 5-15 words
+- Do not reference Twitter, posts, messages, or social media in the instruction
+- Examples:
+  Post: "The best code is the code you never have to write"
+  {"can_generate": true, "instruction": "Share a thought about writing clean, minimal code"}
+
+  Post: "Austin traffic at 5pm is a special kind of hell"
+  {"can_generate": true, "instruction": "Complain humorously about rush hour traffic"}
 
 Return false when the post is mostly:
 - dependent on missing event, thread, link, image, poll, or quoted-post context
@@ -648,11 +651,18 @@ Return true when the post expresses a complete standalone opinion,
 technical explanation, reusable joke, recommendation, observation, or other
 generally useful text."#;
 
-const DM_GATE_PROMPT: &str = r#"You decide whether a private direct message can become useful LLM fine-tune data.
+const DM_GATE_PROMPT: &str = r#"You generate training data for an LLM fine-tune from a private direct message.
 Given only the cleaned outbound message text, decide if someone could write a
 clear, reusable, standalone instruction that would naturally produce this text.
+If so, write a SHORT, natural instruction that is generic enough to be reusable,
+but specific enough to be meaningful.
 
-Return ONLY a JSON object: {"can_generate": true} or {"can_generate": false}
+Return ONLY a JSON object: {"can_generate": true, "instruction": "..."} or {"can_generate": false, "instruction": ""}
+
+Rules:
+- No explanation, no markdown, no extra text
+- Instruction should be 5-15 words
+- Do not reference DMs, private messages, messages, or social media in the instruction
 
 Return false when the message is:
 - dependent on missing conversation context
@@ -685,8 +695,8 @@ fn load_prompt_file(
     Ok(prompt)
 }
 
-fn load_quality_prompts(args: &Args) -> anyhow::Result<QualityPrompts> {
-    Ok(QualityPrompts {
+fn load_generation_prompts(args: &Args) -> anyhow::Result<GenerationPrompts> {
+    Ok(GenerationPrompts {
         tweet: load_prompt_file(args.tweet_prompt.as_deref(), TWEET_GATE_PROMPT, "tweet")?,
         reply: load_prompt_file(args.reply_prompt.as_deref(), REPLY_GATE_PROMPT, "reply")?,
         dm: load_prompt_file(args.dm_prompt.as_deref(), DM_GATE_PROMPT, "DM")?,
@@ -820,120 +830,36 @@ async fn chat_json(
     }
 }
 
-async fn reply_can_generate_instruction(
-    client: &Client,
-    tweet: &str,
-    backend: &BackendConfig,
-    prompt: &str,
-) -> anyhow::Result<bool> {
-    let content = chat_json(
-        client,
-        backend,
-        prompt,
-        format!("Reply: \"{}\"", tweet),
-        0.0,
-        80,
-    )
-    .await?;
-    let parsed: Value = serde_json::from_str(&content).map_err(|e| {
-        anyhow::anyhow!("Reply gate did not return valid JSON: {e}; content: {content}")
-    })?;
-
-    parsed
-        .get("can_generate")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Reply gate JSON did not include boolean field `can_generate`: {content}"
-            )
-        })
-}
-
-async fn tweet_can_generate_instruction(
-    client: &Client,
-    tweet: &str,
-    backend: &BackendConfig,
-    prompt: &str,
-) -> anyhow::Result<bool> {
-    let content = chat_json(
-        client,
-        backend,
-        prompt,
-        format!("Post: \"{}\"", tweet),
-        0.0,
-        100,
-    )
-    .await?;
-    let parsed: Value = serde_json::from_str(&content).map_err(|e| {
-        anyhow::anyhow!("Tweet gate did not return valid JSON: {e}; content: {content}")
-    })?;
-
-    parsed
-        .get("can_generate")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Tweet gate JSON did not include boolean field `can_generate`: {content}"
-            )
-        })
-}
-
-async fn dm_can_generate_instruction(
-    client: &Client,
-    message: &str,
-    backend: &BackendConfig,
-    prompt: &str,
-) -> anyhow::Result<bool> {
-    let content = chat_json(
-        client,
-        backend,
-        prompt,
-        format!("Direct message: \"{}\"", message),
-        0.0,
-        100,
-    )
-    .await?;
-    let parsed: Value = serde_json::from_str(&content).map_err(|e| {
-        anyhow::anyhow!("DM gate did not return valid JSON: {e}; content: {content}")
-    })?;
-
-    parsed
-        .get("can_generate")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            anyhow::anyhow!("DM gate JSON did not include boolean field `can_generate`: {content}")
-        })
-}
-
-async fn generate_instruction(
-    client: &Client,
-    tweet: &str,
-    backend: &BackendConfig,
-) -> anyhow::Result<AlpacaRecord> {
-    let mut content = chat_json(
-        client,
-        backend,
-        SYSTEM_PROMPT,
-        format!("Text: \"{}\"", tweet),
-        0.1,
-        200,
-    )
-    .await?;
-
-    // Strip <think> blocks (reasoning models)
+fn strip_model_json_content(content: &str) -> String {
     let think_re = Regex::new(r"(?s)<think>.*?</think>").unwrap();
-    content = think_re.replace_all(&content, "").trim().to_string();
-
-    // Strip markdown fences
-    content = content
+    think_re
+        .replace_all(content, "")
         .replace("```json", "")
         .replace("```", "")
         .trim()
-        .to_string();
+        .to_string()
+}
 
+fn generation_outcome_from_content(
+    content: &str,
+    tweet: &str,
+    skip_reason: &str,
+) -> anyhow::Result<GenerationOutcome> {
+    let content = strip_model_json_content(content);
     let parsed: Value = serde_json::from_str(&content).map_err(|e| {
         anyhow::anyhow!("Model did not return valid instruction JSON: {e}; content: {content}")
     })?;
+    let can_generate = parsed
+        .get("can_generate")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Model JSON did not include boolean field `can_generate`: {content}")
+        })?;
+
+    if !can_generate {
+        return Ok(GenerationOutcome::Skipped(skip_reason.to_string()));
+    }
+
     let instruction = parsed
         .get("instruction")
         .and_then(Value::as_str)
@@ -947,49 +873,75 @@ async fn generate_instruction(
         anyhow::bail!("Model returned an empty instruction");
     }
 
-    Ok(AlpacaRecord {
+    Ok(GenerationOutcome::Generated(AlpacaRecord {
         instruction,
         input: String::new(),
         output: tweet.to_string(),
-    })
+    }))
+}
+
+async fn generate_instruction(
+    client: &Client,
+    tweet: &str,
+    backend: &BackendConfig,
+    prompt: &str,
+    input_label: &str,
+    skip_reason: &str,
+) -> anyhow::Result<GenerationOutcome> {
+    let content = chat_json(
+        client,
+        backend,
+        prompt,
+        format!("{}: {}", input_label, serde_json::to_string(tweet)?),
+        0.1,
+        240,
+    )
+    .await?;
+
+    generation_outcome_from_content(&content, tweet, skip_reason)
 }
 
 async fn process_tweet(
     client: &Client,
     tweet: &FilteredTweet,
     backend: &BackendConfig,
-    prompts: &QualityPrompts,
+    prompts: &GenerationPrompts,
 ) -> anyhow::Result<GenerationOutcome> {
-    if tweet.is_reply
-        && !reply_can_generate_instruction(client, &tweet.text, backend, &prompts.reply).await?
-    {
-        return Ok(GenerationOutcome::Skipped(
-            "reply too context-dependent for a useful instruction".to_string(),
-        ));
-    }
-    if !tweet.is_reply
-        && !tweet.is_dm
-        && !tweet_can_generate_instruction(client, &tweet.text, backend, &prompts.tweet).await?
-    {
-        return Ok(GenerationOutcome::Skipped(
-            "tweet too context-dependent for a useful instruction".to_string(),
-        ));
-    }
     if tweet.is_dm && contains_private_info(&tweet.text) {
         return Ok(GenerationOutcome::Skipped(
             "DM contains likely private information".to_string(),
         ));
     }
-    if tweet.is_dm
-        && !dm_can_generate_instruction(client, &tweet.text, backend, &prompts.dm).await?
-    {
-        return Ok(GenerationOutcome::Skipped(
-            "DM too private or context-dependent for a useful instruction".to_string(),
-        ));
-    }
 
-    let record = generate_instruction(client, &tweet.text, backend).await?;
-    Ok(GenerationOutcome::Generated(record))
+    let (prompt, input_label, skip_reason) = if tweet.is_dm {
+        (
+            prompts.dm.as_str(),
+            "Direct message",
+            "DM too private or context-dependent for a useful instruction",
+        )
+    } else if tweet.is_reply {
+        (
+            prompts.reply.as_str(),
+            "Reply",
+            "reply too context-dependent for a useful instruction",
+        )
+    } else {
+        (
+            prompts.tweet.as_str(),
+            "Post",
+            "tweet too context-dependent for a useful instruction",
+        )
+    };
+
+    generate_instruction(
+        client,
+        &tweet.text,
+        backend,
+        prompt,
+        input_label,
+        skip_reason,
+    )
+    .await
 }
 
 fn preview_records(label: &str, records: &[FilteredTweet]) {
@@ -1023,7 +975,7 @@ async fn generate_dataset(
     output: &PathBuf,
     client: Arc<Client>,
     backend: Arc<BackendConfig>,
-    prompts: Arc<QualityPrompts>,
+    prompts: Arc<GenerationPrompts>,
     workers: usize,
 ) -> anyhow::Result<()> {
     let seen = load_checkpoint(output).await?;
@@ -1219,7 +1171,7 @@ async fn main() -> anyhow::Result<()> {
         base_url,
         api_key,
     };
-    let prompts = Arc::new(load_quality_prompts(&args)?);
+    let prompts = Arc::new(load_generation_prompts(&args)?);
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(args.timeout_secs))
@@ -1421,5 +1373,38 @@ mod tests {
             openai_content_from_body(body).unwrap(),
             r#"{"instruction":"Do a thing"}"#
         );
+    }
+
+    #[test]
+    fn parses_combined_generation_response() {
+        let content = r#"```json
+{"can_generate": true, "instruction": "Share a concise technical opinion"}
+```"#;
+        let outcome =
+            generation_outcome_from_content(content, "Less code is usually easier to own", "skip")
+                .unwrap();
+
+        match outcome {
+            GenerationOutcome::Generated(record) => {
+                assert_eq!(record.instruction, "Share a concise technical opinion");
+                assert_eq!(record.output, "Less code is usually easier to own");
+            }
+            GenerationOutcome::Skipped(reason) => panic!("unexpected skip: {reason}"),
+        }
+    }
+
+    #[test]
+    fn parses_combined_generation_skip() {
+        let outcome = generation_outcome_from_content(
+            r#"{"can_generate": false, "instruction": ""}"#,
+            "yeah same",
+            "too context-dependent",
+        )
+        .unwrap();
+
+        match outcome {
+            GenerationOutcome::Generated(_) => panic!("unexpected generated record"),
+            GenerationOutcome::Skipped(reason) => assert_eq!(reason, "too context-dependent"),
+        }
     }
 }
