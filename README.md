@@ -141,6 +141,16 @@ cargo run -- \
   --model qwen3:14b
 ```
 
+Ollama keeps the model loaded for 30 minutes after each request by default.
+Use `--ollama-keep-alive` to tune that window:
+
+```bash
+cargo run -- \
+  --archive ~/Downloads/twitter-2026-06-03-archive \
+  --ollama-keep-alive 60m \
+  --model qwen3:14b
+```
+
 Use the OpenAI backend instead of Ollama:
 
 ```bash

@@ -61,6 +61,10 @@ struct Args {
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
 
+    /// How long Ollama should keep the model loaded after each request
+    #[arg(long, default_value = "30m")]
+    ollama_keep_alive: String,
+
     /// OpenAI base URL
     #[arg(long, default_value = "https://api.openai.com")]
     openai_base_url: String,
@@ -141,6 +145,7 @@ struct BackendConfig {
     model: String,
     base_url: String,
     api_key: Option<String>,
+    ollama_keep_alive: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -807,6 +812,7 @@ async fn chat_json(
                 "stream": false,
                 "format": "json",
                 "think": false,
+                "keep_alive": backend.ollama_keep_alive.as_deref().unwrap_or("30m"),
                 "options": {"temperature": temperature, "num_predict": max_tokens}
             });
             ollama_chat(client, payload, &backend.base_url).await
@@ -1102,13 +1108,18 @@ async fn main() -> anyhow::Result<()> {
         BackendKind::Openai => 4,
     });
 
+    let keep_alive_note = match args.backend {
+        BackendKind::Ollama => format!(" | keep alive: {}", args.ollama_keep_alive),
+        BackendKind::Openai => String::new(),
+    };
     eprintln!(
-        "Using backend: {} | model: {} | base URL: {} | workers: {} | timeout: {}s | output: {} | dms output: {}",
+        "Using backend: {} | model: {} | base URL: {} | workers: {} | timeout: {}s{} | output: {} | dms output: {}",
         args.backend,
         args.model,
         base_url,
         workers,
         args.timeout_secs,
+        keep_alive_note,
         args.output.display(),
         args.dms_output.display()
     );
@@ -1170,6 +1181,10 @@ async fn main() -> anyhow::Result<()> {
         model: args.model.clone(),
         base_url,
         api_key,
+        ollama_keep_alive: match args.backend {
+            BackendKind::Ollama => Some(args.ollama_keep_alive.clone()),
+            BackendKind::Openai => None,
+        },
     };
     let prompts = Arc::new(load_generation_prompts(&args)?);
 
